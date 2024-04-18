@@ -4,6 +4,7 @@ import java.io.File;
 import java.util.*;
 import java.util.concurrent.*;
 import com.aliyun.teautil.models.RuntimeOptions;
+import java.net.URL;
 
 public class OpenAPIDetector implements ScanTask.TaskCallback {
 	/**
@@ -89,6 +90,21 @@ public class OpenAPIDetector implements ScanTask.TaskCallback {
 			m_client_opt = null;
 		}
 	}
+	
+	/**
+	 * 初始化解压缩配置参数
+	 * @param open 是否识别压缩文件并解压
+	 * @param maxlayer 最大解压层数，open参数为true时生效
+	 * @param maxfilecount 最大解压文件数，open参数为true时生效
+	 * @return
+	 */
+	public ERR_CODE initDecompress(boolean open, int maxlayer, int maxfilecount) {
+		if (!m_is_inited) {
+			return ERR_CODE.ERR_INIT;
+		}
+		m_decompress = new Decompress(open, maxlayer, maxfilecount);
+		return ERR_CODE.ERR_SUCC;
+	}
 
 	/**
 	 * 同步文件检测
@@ -99,15 +115,40 @@ public class OpenAPIDetector implements ScanTask.TaskCallback {
 	 * @throws InterruptedException
 	 */
 	public DetectResult detectSync(String file_path, int timeout) throws InterruptedException {
+		return internalDetectSync(file_path, null, timeout);
+	}
+	
+	/**
+	 * 同步URL文件检测
+	 * 
+	 * @param url  待检测文件下载链接URL
+	 * @param md5  文件md5
+	 * @param timeout   超时时长，单位毫秒， < 0 无限等待
+	 * @param res       检测结果
+	 * @throws InterruptedException
+	 */
+	public DetectResult detectUrlSync(String url, String md5, int timeout) throws InterruptedException {
+		return internalDetectSync(url, md5, timeout);
+	}
+	
+	private DetectResult internalDetectSync(String file_path, String md5, int timeout) throws InterruptedException {
 		final DetectResult res[] = new DetectResult[1];
-		int seq = detect(file_path, timeout, new IDetectResultCallback() {
+		IDetectResultCallback callback = new IDetectResultCallback() {
 			public void onScanResult(int seq, String file_path, DetectResult callback_res) {
 				res[0] = callback_res;
 				synchronized(res) {
 					res.notify();
 				}
 			}
-		});
+		};
+		int seq = 0;
+		if (md5 == null) {
+			// 本地文件检测
+			seq = detect(file_path, timeout, callback);
+		} else {
+			// URL文件检测
+			seq = detectUrl(file_path, md5, timeout, callback);
+		}
 		
 		if (seq > 0) {
 			synchronized(res) {
@@ -130,11 +171,46 @@ public class OpenAPIDetector implements ScanTask.TaskCallback {
 	 */
 	public int detect(String file_path, int timeout, IDetectResultCallback callback) {
 		long filesize = get_filesize(file_path);
-		ScanTask task = new ScanTask(file_path, filesize, timeout, callback);
+		ScanTask task = new ScanTask(file_path, filesize, timeout, callback, m_decompress);
 		if (filesize < 0) {
-			task.errorCallback(ERR_CODE.ERR_FILE_NOT_FOUND, null);
+			task.errorCallback(ERR_CODE.ERR_FILE_NOT_FOUND, file_path);
 			return ERR_CODE.ERR_FILE_NOT_FOUND.value();
 		}
+		return internalDetect(task);
+	}
+	
+	/**
+	 * 异步URL文件检测
+	 * @param url  待检测文件下载链接URL
+	 * @param md5  文件md5
+	 * @param timeout   超时时长，单位毫秒， < 0 无限等待
+	 * @param callback  检测结果
+	 * @return >0 发起检测成功，检测请求序列号 < 0 错误码，参见ERR_CODE
+	 */
+	public int detectUrl(String url, String md5, int timeout, IDetectResultCallback callback) {
+		if (md5 != null) {
+			// 转小写
+			md5 = md5.toLowerCase();
+		}
+		ScanTask task = new ScanTask(url, md5, timeout, callback, m_decompress);
+		if (md5 == null || md5.length() != 32 || !md5.matches("[0-9a-f]+")) {
+			task.errorCallback(ERR_CODE.ERR_MD5, md5);
+			return ERR_CODE.ERR_MD5.value();
+		}
+		if (url == null) {
+			task.errorCallback(ERR_CODE.ERR_URL, url);
+			return ERR_CODE.ERR_URL.value();
+		}
+		try {
+			new URL(url);
+		} catch (Exception e) {
+			task.errorCallback(ERR_CODE.ERR_URL, String.format("Malformed URL Exception: %s. URL: %s", e.getMessage(), url));
+			return ERR_CODE.ERR_URL.value();
+		}
+		return internalDetect(task);
+	}
+	
+	private int internalDetect(ScanTask task) {
 		int seq = 0;
 		try {
 			if (m_is_inited) {
@@ -246,6 +322,7 @@ public class OpenAPIDetector implements ScanTask.TaskCallback {
 	private int m_counter = 0;
 	private ThreadPoolExecutor m_threadpool = null;
 	private RejectedExecutionHandler m_rej_handler = null;
+	private Decompress m_decompress = null;
 
 	volatile boolean m_is_inited = false;
 	com.aliyun.sas20181203.Client m_client = null;

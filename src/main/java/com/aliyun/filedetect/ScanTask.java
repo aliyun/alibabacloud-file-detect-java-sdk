@@ -21,6 +21,8 @@ import java.util.concurrent.LinkedBlockingDeque;
 import javax.activation.MimetypesFileTypeMap;
 import org.apache.commons.codec.binary.Hex;
 
+import com.aliyun.filedetect.DetectResult.VirusInfo;
+import com.aliyun.filedetect.ScanTask.ResultInfo;
 import com.aliyun.sas20181203.models.CreateFileDetectRequest;
 import com.aliyun.sas20181203.models.CreateFileDetectUploadUrlRequest;
 import com.aliyun.sas20181203.models.CreateFileDetectUploadUrlResponse;
@@ -29,6 +31,10 @@ import com.aliyun.sas20181203.models.GetFileDetectResultResponse;
 import com.aliyun.sas20181203.models.GetFileDetectResultResponseBody.GetFileDetectResultResponseBodyResultList;
 import com.aliyun.sas20181203.models.CreateFileDetectUploadUrlResponseBody.CreateFileDetectUploadUrlResponseBodyUploadUrlList;
 import com.aliyun.sas20181203.models.CreateFileDetectUploadUrlResponseBody.CreateFileDetectUploadUrlResponseBodyUploadUrlListContext;
+import com.aliyun.sas20181203.models.ListCompressFileDetectResultRequest;
+import com.aliyun.sas20181203.models.ListCompressFileDetectResultResponse;
+import com.aliyun.sas20181203.models.ListCompressFileDetectResultResponseBody.ListCompressFileDetectResultResponseBodyResultList;
+
 import com.aliyun.tea.TeaException;
 import com.aliyun.teautil.models.RuntimeOptions;
 import com.google.gson.Gson;
@@ -49,13 +55,27 @@ class ScanTask implements Runnable {
 		public void onTaskBegin(ScanTask task);
 	}
 	private TaskCallback m_taskCallback = null;
+	private Decompress m_decompress = null;
+	private boolean m_islocal = true; // 是否为本地文件
 
-	public ScanTask(String file_path, long size, int timeout, IDetectResultCallback callback) {
+	public ScanTask(String file_path, long size, int timeout, IDetectResultCallback callback, Decompress decompress) {
+		m_islocal = true;
 		m_path = file_path;
 		m_size = size;
 		m_timeout = timeout;
 		m_callback = callback;
 		m_start_time = System.currentTimeMillis();
+		m_decompress = decompress;
+	}
+	
+	public ScanTask(String url, String md5, int timeout, IDetectResultCallback callback, Decompress decompress) {
+		m_islocal = false;
+		m_path = url;
+		m_result.md5 = md5;
+		m_timeout = timeout;
+		m_callback = callback;
+		m_start_time = System.currentTimeMillis();
+		m_decompress = decompress;
 	}
 
 	public void setSeq(int seq) {
@@ -87,7 +107,7 @@ class ScanTask implements Runnable {
 		RuntimeOptions client_opt = detector.m_client_opt;
 		LinkedBlockingDeque<Runnable> queue = detector.m_queue;
 		if (!detector.m_is_inited || null == client || null == queue) {
-			errorCallback(ERR_CODE.ERR_INIT, null);
+			errorCallback(ERR_CODE.ERR_INIT, m_path);
 			return;
 		}
 		// 判断是否已超时
@@ -99,7 +119,7 @@ class ScanTask implements Runnable {
 		if (null == m_result.md5) {
 			m_result.md5 = calcMd5(m_path);
 			if (null == m_result.md5) {
-				errorCallback(ERR_CODE.ERR_FILE_NOT_FOUND, null);
+				errorCallback(ERR_CODE.ERR_FILE_NOT_FOUND, m_path);
 				return;
 			}
 		}
@@ -203,9 +223,9 @@ class ScanTask implements Runnable {
 		if (m_timeout >= 0) {
 			if (curr_time - m_start_time > m_timeout) {
 				if (null == m_result.md5) {
-					errorCallback(ERR_CODE.ERR_TIMEOUT_QUEUE, null);
+					errorCallback(ERR_CODE.ERR_TIMEOUT_QUEUE, m_path);
 				} else {
-					errorCallback(ERR_CODE.ERR_TIMEOUT, null);
+					errorCallback(ERR_CODE.ERR_TIMEOUT, m_path);
 				}
 				return true;
 			}
@@ -285,6 +305,7 @@ class ScanTask implements Runnable {
             if (null != org_result.score) {
             	score = org_result.score;
             }
+            getListCompressFileResult(client, client_opt, md5, org_result);
             return new ResultInfo(result, score, org_result.virusType, org_result.ext);
         } catch (TeaException error) {
         	if ("GetResultFail".equals(error.code)) {
@@ -305,16 +326,90 @@ class ScanTask implements Runnable {
         }
 	}
 	
+	private boolean getListCompressFileResult(com.aliyun.sas20181203.Client client, RuntimeOptions client_opt, String md5, GetFileDetectResultResponseBodyResultList org_result) {
+		if (org_result == null || org_result.result == null || org_result.compress == null) {
+			return false; // 结果值不合法
+		}
+		if (org_result.result == IS_DETECTING) {
+			return false; // 在检测中
+		}
+		if (org_result.compress == false) {
+			return false; // 不是压缩包
+		}
+		
+		int cur_page = 1;
+		int page_size = 50;
+		m_result.compresslist = new ArrayList<DetectResult.CompressFileDetectResultInfo>();
+		while(true) {
+			int ret_code = getListCompressFileResultByAPI(client, client_opt, md5, cur_page, page_size);
+			if (ret_code == REQUEST_TOO_FREQUENTLY) {
+				needSleep(Config.REQUEST_TOO_FREQUENTLY_SLEEP_TIME); // 请求太过频繁，需要休眠
+				continue;
+			} else if (ret_code == HAS_EXCEPTION) {
+				break; // 报错退出
+			}
+			if (ret_code != page_size) {
+				break; // 查询完成，退出
+			}
+			cur_page ++; // 加载下一页
+		}
+		return true;
+	}
+	
+	private int getListCompressFileResultByAPI(com.aliyun.sas20181203.Client client, RuntimeOptions client_opt, String md5, int cur_page, int page_size) {
+		String api_name = "ListCompressFileDetectResult";
+		try {
+            ListCompressFileDetectResultRequest request = new ListCompressFileDetectResultRequest();
+            request.setHashKey(md5);
+            request.setCurrentPage(cur_page);
+            request.setPageSize(page_size);
+            ListCompressFileDetectResultResponse response = client.listCompressFileDetectResultWithOptions(request, client_opt);
+            int cnt = 0;
+            for (ListCompressFileDetectResultResponseBodyResultList org_result : response.body.resultList) {
+            	cnt++;
+    			DetectResult.CompressFileDetectResultInfo comp_res = new DetectResult.CompressFileDetectResultInfo(org_result.path);
+    			if (null != org_result.score) {
+    				comp_res.score = org_result.score;
+                }
+    			if (null != org_result.result) {
+    				if (org_result.result == IS_BLACK) {
+        				comp_res.result = DetectResult.RESULT.RES_BLACK;
+        				VirusInfo vinfo = new VirusInfo();
+        	    		vinfo.virus_type = org_result.virusType;
+        	    		vinfo.ext_info = org_result.ext;
+        	    		comp_res.setVirusInfo(vinfo);
+        			} else if (org_result.result == IS_OK){
+        				comp_res.result = DetectResult.RESULT.RES_WHITE;
+        			}
+    			}
+    			m_result.compresslist.add(comp_res);
+            }
+            return cnt;
+        } catch (TeaException error) {
+        	if ("RequestTooFrequently".equals(error.code)) {
+        		return REQUEST_TOO_FREQUENTLY;
+        	}
+        	if ("Throttling.User".equals(error.code)) {
+        		return REQUEST_TOO_FREQUENTLY;
+        	}
+        	m_result.compresslist.add(new DetectResult.CompressFileDetectResultInfo(getErrorMessage(api_name, error.code, error.message)));
+        	return HAS_EXCEPTION;
+        } catch (Exception error) {
+        	m_result.compresslist.add(new DetectResult.CompressFileDetectResultInfo(getErrorMessage(api_name, "ERR_NETWORK", error.getMessage())));
+        	return HAS_EXCEPTION;
+        }
+	}
+	
 	private int uploadAndDetectByAPI(com.aliyun.sas20181203.Client client, RuntimeOptions client_opt, String path, String md5) {
 		String api_name = "";
 		ERR_CODE api_callerr = ERR_CODE.ERR_CALL_API;
 		try {
         	CreateFileDetectUploadUrlResponseBodyUploadUrlList upload_url_response = null;
-        	{
+        	if (m_islocal) {
         		// 获取上传参数
         		api_name = "CreateFileDetectUploadUrl";
         		api_callerr = ERR_CODE.ERR_CALL_API;
-        		
+
         		CreateFileDetectUploadUrlRequest.CreateFileDetectUploadUrlRequestHashKeyContextList hashKeyContextList0 = new CreateFileDetectUploadUrlRequest.CreateFileDetectUploadUrlRequestHashKeyContextList()
                         .setHashKey(md5)
                         .setFileSize((int)m_size);
@@ -326,7 +421,7 @@ class ScanTask implements Runnable {
 	            CreateFileDetectUploadUrlResponse response = client.createFileDetectUploadUrlWithOptions(request, client_opt);
 	            upload_url_response = response.body.getUploadUrlList().get(0);
         	}
-            if (!upload_url_response.fileExist) {
+            if (m_islocal && !upload_url_response.fileExist) {
             	// 上传文件
             	api_name = "UploadFile";
             	api_callerr = ERR_CODE.ERR_UPLOAD;
@@ -338,8 +433,17 @@ class ScanTask implements Runnable {
             	api_callerr = ERR_CODE.ERR_CALL_API;
             	CreateFileDetectRequest request = new CreateFileDetectRequest();
 	            request.setHashKey(md5);
-	            request.setOssKey(upload_url_response.context.ossKey);
+	            if (m_islocal) {
+	            	request.setOssKey(upload_url_response.context.ossKey);
+	            } else {
+	            	request.setDownloadUrl(path);
+	            }
 	            request.setType(0);
+	            if (m_decompress != null) {
+		            request.setDecompress(m_decompress.isOpen());
+		            request.setDecompressMaxLayer(m_decompress.getMaxLayer());
+		            request.setDecompressMaxFileCount(m_decompress.getMaxFileCount());
+	            }
 	            client.createFileDetectWithOptions(request, client_opt);
             }
             

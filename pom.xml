@@ -3,7 +3,7 @@
   <modelVersion>4.0.0</modelVersion>
   <groupId>com.aliyun</groupId>
   <artifactId>filedetect</artifactId>
-  <version>1.0.0</version>
+  <version>1.1.0</version>
   <packaging>jar</packaging>
   <name>filedetect</name>
   <description>Alibaba Cloud File Detect SDK for Java
@@ -40,7 +40,7 @@
     <dependency>
       <groupId>com.aliyun</groupId>
       <artifactId>sas20181203</artifactId>
-      <version>1.1.30</version>
+      <version>2.23.0</version>
     </dependency>
   </dependencies>
   <build>

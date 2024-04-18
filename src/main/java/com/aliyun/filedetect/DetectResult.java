@@ -1,5 +1,8 @@
 package com.aliyun.filedetect;
 
+import java.util.List;
+
+
 public class DetectResult {
 	
 	// 检测是否成功完成，true: 可通过getDetectResultInfo查看结果; false: 可通过getErrorInfo获取错误信息
@@ -34,6 +37,7 @@ public class DetectResult {
     	info.time = this.time;
     	info.result = this.result;
     	info.score = this.score;
+    	info.compresslist = this.compresslist;
     	return info;
     }
 	
@@ -69,6 +73,7 @@ public class DetectResult {
 		public long time = 0; // 用时，单位为毫秒
 		public RESULT result = RESULT.RES_UNKNOWN; // 检测结果
 		public int score = 0;				     // 分值，取值范围0-100
+		public List<CompressFileDetectResultInfo> compresslist = null; // 如果是压缩包，并且开启了压缩包解压参数，则此处会输出压缩包内文件检测结果
 		//to developer:支持有null的语言，可以直接返回VirusInfo对象信息，如果没有错误码，返回null
 	    //获取病毒信息,如result为RES_BLACK，可通过此接口获取病毒信息
 		public VirusInfo getVirusInfo() {
@@ -76,6 +81,24 @@ public class DetectResult {
 		}
 		public DetectResultInfo(VirusInfo vinfo) {
 			this.virusinfo = vinfo;
+		}
+		private VirusInfo virusinfo = null;
+	}
+	
+	public static class CompressFileDetectResultInfo {
+		public String path = null; // 压缩文件路径
+		public RESULT result = RESULT.RES_UNKNOWN; // 检测结果
+		public int score = 0;				     // 分值，取值范围0-100
+		//to developer:支持有null的语言，可以直接返回VirusInfo对象信息，如果没有错误码，返回null
+	    //获取病毒信息,如result为RES_BLACK，可通过此接口获取病毒信息
+		public VirusInfo getVirusInfo() {
+			return virusinfo;
+		}
+		public void setVirusInfo(VirusInfo vinfo) {
+			this.virusinfo = vinfo;
+		}
+		public CompressFileDetectResultInfo(String path) {
+			this.path = path;
 		}
 		private VirusInfo virusinfo = null;
 	}
@@ -98,4 +121,5 @@ public class DetectResult {
 	public int score = 0;				     // 分值，取值范围0-100
 	public String virus_type = null;	     // 病毒类型，如“黑客工具”
 	public String ext_info = null;	         // 扩展信息为json字符串
+	List<CompressFileDetectResultInfo> compresslist = null; 
 }
